@@ -188,11 +188,114 @@ module apb_master
     wait (presetn === 1'b1);          // ждем снятия сброса
     repeat (5) @(posedge pclk);
 
-    // --- базовый тест: RESULT = 0 ^ A5A5A5A5 ---
-    $display("[MASTER] basic test: accumulate");
+    // --- 1. значения после сброса ---
+    $display("[MASTER] test 1: reset values");
+    check_all();
+
+    // --- 2. базовое накопление: RESULT = 0 ^ A5A5A5A5 ---
+    $display("[MASTER] test 2: basic accumulate");
     write_addend(32'hA5A5_A5A5);
     write_ctrl(32'h3);                // EN = 1, ADD = 1
-    apb_read_check(BASE_ADDR + OFF_RESULT, 32'hA5A5_A5A5);
+    check_all();
+
+    // --- 3. повторное сложение того же числа возвращает прежний результат ---
+    $display("[MASTER] test 3: accumulate twice");
+    write_ctrl(32'h3);
+    check_all();                      // RESULT = 0
+    write_ctrl(32'h3);
+    check_all();                      // RESULT = A5A5A5A5
+
+    // --- 4. накопление разных значений ---
+    $display("[MASTER] test 4: different addends");
+    write_addend(32'h5A5A_5A5A);
+    write_ctrl(32'h3);
+    check_all();                      // RESULT = FFFFFFFF
+    write_addend(32'hFFFF_FFFF);
+    write_ctrl(32'h3);
+    check_all();                      // RESULT = 0
+    write_addend(32'h0000_0000);
+    write_ctrl(32'h3);
+    check_all();
+
+    // --- 5. ADD при EN = 0 не изменяет результат ---
+    $display("[MASTER] test 5: ADD with EN=0");
+    write_addend(32'h1234_5678);
+    write_ctrl(32'h3);                // RESULT = 12345678
+    write_ctrl(32'h2);                // ADD = 1, EN = 0: игнорируется
+    check_all();
+    write_ctrl(32'h0);                // EN = 0
+    check_all();
+
+    // --- 6. CLR сбрасывает результат; CLR приоритетнее ADD ---
+    $display("[MASTER] test 6: CLR");
+    write_ctrl(32'h1);                // EN = 1 без ADD
+    write_ctrl(32'h4);                // CLR при EN = 0
+    check_all();
+    write_ctrl(32'h3);                // RESULT = 12345678
+    write_ctrl(32'h7);                // CLR + ADD + EN: побеждает CLR
+    check_all();                      // RESULT = 0
+
+    // --- 7. зарезервированные биты CTRL читаются как 0 ---
+    $display("[MASTER] test 7: reserved bits");
+    write_ctrl(32'hFFFF_FFF9);        // EN = 1, ADD = 0, CLR = 0, остальные биты = 1
+    check_all();
+
+    // --- 8. ошибки: запись в RESULT, неверные адреса ---
+    $display("[MASTER] test 8: errors");
+    write_ctrl(32'h1);
+    write_addend(32'hDEAD_BEEF);
+    write_ctrl(32'h3);
+    apb_write(BASE_ADDR + OFF_RESULT, 32'hFFFF_FFFF);   // RESULT только для чтения
+    check_slverr(1'b1);
+    check_all();                                        // результат не изменился
+    apb_write(BASE_ADDR + 32'h0C, 32'h1);               // несуществующий адрес
+    check_slverr(1'b1);
+    apb_write(BASE_ADDR + 32'h80, 32'h1);
+    check_slverr(1'b1);
+    apb_read(BASE_ADDR + 32'h0C, dummy);                // чтение несуществующего адреса
+    check_slverr(1'b1);
+    apb_read(BASE_ADDR + 32'hFC, dummy);
+    check_slverr(1'b1);
+    apb_write(BASE_ADDR + OFF_ADDEND, 32'h1);           // обращение без ошибки
+    exp_addend = 32'h1;
+    check_slverr(1'b0);                                 // pslverr сброшен
+    check_all();
+
+    // --- 9. алиас адреса: старшие биты адреса не декодируются ---
+    $display("[MASTER] test 9: address alias");
+    apb_write(32'hFFFF_FF00 + OFF_ADDEND, 32'hC3C3_C3C3);
+    exp_addend = 32'hC3C3_C3C3;
+    apb_read_check(32'h0000_0000 + OFF_ADDEND, 32'hC3C3_C3C3);
+    apb_write(32'h8F0F_0F00 + OFF_CTRL, 32'h5);         // CLR + EN
+    exp_en = 1'b1; exp_result = '0;
+    apb_read_check(32'h7070_7004, 32'h1);
+    apb_read_check(32'h0F0F_0F08, exp_result);
+
+    // --- 10. псевдослучайная последовательность ---
+    $display("[MASTER] test 10: pseudo-random");
+    for (i = 0; i < 40; i = i + 1) begin
+      lfsr = {lfsr[30:0], lfsr[31] ^ lfsr[21] ^ lfsr[1] ^ lfsr[0]};
+      write_addend(lfsr ^ {lfsr[15:0], lfsr[31:16]});
+      lfsr = {lfsr[30:0], lfsr[31] ^ lfsr[21] ^ lfsr[1] ^ lfsr[0]};
+      write_ctrl({29'b0, lfsr[2:0]});
+      check_all();
+    end
+
+    // --- 11. обрыв обмена: устройство не должно менять регистры ---
+    $display("[MASTER] test 11: aborted transfers");
+    write_addend(32'h1111_2222);
+    write_ctrl(32'h1);
+    apb_abort(BASE_ADDR + OFF_ADDEND, 1'b1, 2'd0);      // запись: psel снят сразу
+    apb_abort(BASE_ADDR + OFF_RESULT, 1'b0, 2'd0);      // чтение: psel снят сразу
+    apb_abort(BASE_ADDR + OFF_ADDEND, 1'b1, 2'd1);      // запись: psel удержан без penable
+    apb_abort(BASE_ADDR + OFF_RESULT, 1'b0, 2'd1);      // чтение: psel удержан без penable
+    apb_abort(BASE_ADDR + OFF_ADDEND, 1'b1, 2'd2);      // запись: penable при смене направления
+    apb_abort(BASE_ADDR + OFF_RESULT, 1'b0, 2'd2);      // чтение: penable при смене направления
+    apb_abort(BASE_ADDR + OFF_ADDEND, 1'b1, 2'd3);      // запись: penable при снятом psel
+    apb_abort(BASE_ADDR + OFF_RESULT, 1'b0, 2'd3);      // чтение: penable при снятом psel
+    check_all();                                        // регистры не изменились
+    write_ctrl(32'h3);                                  // и обмен после обрыва работает
+    check_all();
 
     if (errors == 0) $display("[MASTER] TEST PASSED");
     else             $display("[MASTER] TEST FAILED, errors = %0d", errors);

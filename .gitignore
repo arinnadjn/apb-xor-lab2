@@ -1,0 +1,13 @@
+# артефакты симуляции и покрытия - в репозитории только исходники и скрипты
+sim.out
+work/
+transcript
+modelsim.ini
+vsim.wlf
+wlf*
+*.wlf
+*.vcd
+*.ucdb
+cov_report.txt
+cov_html/
+*.log
